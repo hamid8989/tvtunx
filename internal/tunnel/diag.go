@@ -21,6 +21,7 @@ type DiagConfig struct {
 	Transport     string
 	Domain        string // browser transport
 	Label         string // browser transport (rotating subdomains)
+	DoH           string // browser transport: resolve the exit hostname over this DoH endpoint
 	UDPTargetMbit int
 	Net           string // carrier network: "auto" (default), "udp" or "tcp"
 }
@@ -42,7 +43,7 @@ func RunDiag(cfg DiagConfig) *Report {
 
 	// 1) Carrier reachability + masquerade/handshake latency.
 	ccfg := ClientConfig{
-		ServerAddr: cfg.ServerAddr, PSK: cfg.PSK, SNI: cfg.SNI, Domain: cfg.Domain, Label: cfg.Label,
+		ServerAddr: cfg.ServerAddr, PSK: cfg.PSK, SNI: cfg.SNI, Domain: cfg.Domain, Label: cfg.Label, DoH: cfg.DoH,
 		Transport: cfg.Transport, UDPTargetMbit: cfg.UDPTargetMbit, Net: cfg.Net,
 	}
 	// Try the transport's UDP carrier first; if UDP is blocked/dropped, try the

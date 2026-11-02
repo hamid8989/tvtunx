@@ -1,4 +1,4 @@
-TVtunX v2.0.0 downloads
+TVtunX v2.0.1 downloads
 -----------------------
 What's new in 2.0: DUAL-STACK carrier. Every transport (reality-udp / udp /
 browser) now listens on the SAME port over BOTH UDP and TCP. The relay uses UDP
@@ -12,7 +12,7 @@ Easiest install (needs only git, no Go):
 Direct binary (x86_64 / most VPS incl. Hetzner):
     https://github.com/hamid8989/tvtunx/raw/main/dist/tvtunx-linux-amd64
 Full source tarball:
-    https://github.com/hamid8989/tvtunx/raw/main/release/tvtunx-2.0.0.tar.gz
+    https://github.com/hamid8989/tvtunx/raw/main/release/tvtunx-2.0.1.tar.gz
 Verify: sha256sum -c SHA256SUMS.txt   (from repo root)
 
 After install, open the tunnel port for BOTH udp and tcp (incl. any cloud

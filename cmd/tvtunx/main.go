@@ -401,6 +401,7 @@ func runDiag(args []string) {
 	sni := fs.String("sni", "", "reality-udp: real site name in the ClientHello")
 	domain := fs.String("domain", "", "browser: the exit's real domain")
 	label := fs.String("label", "", "browser: rotating-subdomain label (match the exit)")
+	doh := fs.String("doh", "", "browser: resolve the exit's hostname over this DoH endpoint instead of a pinned IP")
 	transport := fs.String("transport", "reality-udp", "carrier transport: udp, reality-udp or browser")
 	netMode := fs.String("net", "auto", "carrier network: auto (UDP, then TCP fallback), udp, or tcp")
 	udpTarget := fs.Int("udp-target", 0, "pace the UDP carrier to this Mbit/s (0 = unpaced)")
@@ -422,6 +423,7 @@ func runDiag(args []string) {
 		SNI:           *sni,
 		Domain:        *domain,
 		Label:         *label,
+		DoH:           *doh,
 		Transport:     *transport,
 		Net:           *netMode,
 		UDPTargetMbit: *udpTarget,
