@@ -1,6 +1,11 @@
-TVtunX v1.4.1 prebuilt downloads
---------------------------------
-tvtunx-1.4.1.tar.gz    full source + installer (build it yourself)
-tvtunx-linux-amd64     ready-to-run binary for x86_64 Linux (most VPS, incl. Hetzner)
-tvtunx-linux-arm64     ready-to-run binary for ARM64 Linux
-Verify with: sha256sum -c SHA256SUMS.txt
+TVtunX v1.4.1 downloads
+-----------------------
+Easiest install (needs only git, no Go):
+    git clone https://github.com/hamid8989/tvtunx.git
+    cd tvtunx && sudo bash deploy/install.sh
+
+Direct binary (x86_64 / most VPS incl. Hetzner):
+    https://github.com/hamid8989/tvtunx/raw/main/dist/tvtunx-linux-amd64
+Full source tarball:
+    https://github.com/hamid8989/tvtunx/raw/main/release/tvtunx-1.4.1.tar.gz
+Verify: sha256sum -c SHA256SUMS.txt   (from repo root)
