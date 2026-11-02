@@ -22,6 +22,7 @@ type DiagConfig struct {
 	Domain        string // browser transport
 	Label         string // browser transport (rotating subdomains)
 	UDPTargetMbit int
+	Net           string // carrier network: "auto" (default), "udp" or "tcp"
 }
 
 // Report is a human-readable diagnostic outcome. It reports and SUGGESTS; it
@@ -42,19 +43,24 @@ func RunDiag(cfg DiagConfig) *Report {
 	// 1) Carrier reachability + masquerade/handshake latency.
 	ccfg := ClientConfig{
 		ServerAddr: cfg.ServerAddr, PSK: cfg.PSK, SNI: cfg.SNI, Domain: cfg.Domain, Label: cfg.Label,
-		Transport: cfg.Transport, UDPTargetMbit: cfg.UDPTargetMbit,
+		Transport: cfg.Transport, UDPTargetMbit: cfg.UDPTargetMbit, Net: cfg.Net,
 	}
-	label := fmt.Sprintf("carrier to %s (transport %s)", cfg.ServerAddr, carrierName(cfg.Transport))
+	// Try the transport's UDP carrier first; if UDP is blocked/dropped, try the
+	// TCP fallback on the same port and report which path the relay would use.
 	t0 := time.Now()
-	raw, err := dialCarrier(ccfg)
+	raw, path, err := dialCarrierProbe(ccfg)
 	if err != nil {
 		r.OK = false
-		r.addf("%s: FAILED (%v)", label, err)
-		r.sugg("Open the UDP port on the exit and check the ISP is not blocking UDP on it. Confirm the PSK and transport match on both ends. Try another port (e.g. 443 / 8443 / 2083).")
+		r.addf("carrier to %s (transport %s): FAILED on both UDP and TCP (%v)", cfg.ServerAddr, carrierName(cfg.Transport), err)
+		r.sugg("Neither UDP nor TCP reached the exit on this port. Open the tunnel port for BOTH udp and tcp on the exit — including any CLOUD firewall (Hetzner/AWS/GCP security group), which sits above the VM and is not affected by ufw/iptables. Confirm the PSK, transport and port match on both ends, and try another port (e.g. 443 / 8443 / 2083).")
 		return r
 	}
 	connMS := time.Since(t0).Milliseconds()
-	r.addf("%s: ok (%d ms)", label, connMS)
+	r.addf("carrier to %s (transport %s): ok over %s (%d ms)", cfg.ServerAddr, carrierName(cfg.Transport), strings.ToUpper(path), connMS)
+	if path == "tcp" {
+		r.addf("note: UDP did not answer — using the TCP fallback (something is blocking UDP on this port).")
+		r.sugg("UDP is blocked on this path but the tunnel works over TCP. For best performance (loss-tolerant UDP), open the tunnel port for UDP on the exit's CLOUD firewall. Until then TCP is fine.")
+	}
 
 	// 2) PSK handshake latency (detects wrong PSK / fallback / DPI reset).
 	// Deadline-bounded: on a PSK/transport mismatch the exit passes us through to

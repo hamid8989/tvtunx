@@ -125,6 +125,9 @@ TR="reality-udp"
 choose_transport(){
   echo
   printf "  ${B}Transport${X} ${D}— how the two servers connect (same on both ends)${X}\n"
+  printf "  ${D}All transports are dual-stack: the relay uses UDP when it can and falls back${X}\n"
+  printf "  ${D}to TCP on the same port if UDP is blocked, so a UDP-blocking firewall can't${X}\n"
+  printf "  ${D}stop the tunnel. The choice below only sets the disguise/carrier style.${X}\n"
   hr
   printf "    ${B}1${X}  reality-udp  ${D}QUIC masquerade over reliable-UDP: the opening packet${X}\n"
   printf "                   ${D}looks like a real Chrome HTTP/3 handshake to an allowed site,${X}\n"
@@ -229,15 +232,17 @@ finish_exit(){
   echo; hr
   printf "  ${B}EXIT TUNNEL '${name}' READY${X}  ${D}(transport: ${tr})${X}\n"
   field "public IP" "${PUBIP:-unknown}"
-  field "tunnel listen (UDP)" "0.0.0.0:${lp}"
+  field "tunnel listen" "0.0.0.0:${lp}  (UDP + TCP — dual-stack)"
   field "service" "tvtunx-server@${name}"
   hr
   echo
   printf "  ${B}Pre-shared key — paste this on the RELAY (same transport + port + name's choice):${X}\n\n"
   printf "      ${G}${B}%s${X}\n\n" "$psk"
-  printf "  ${Y}Open UDP port ${lp} here (incl. any cloud firewall). One exit tunnel already${X}\n"
-  printf "  ${Y}serves MANY relays on this port; add another exit tunnel only for a separate${X}\n"
-  printf "  ${Y}key/port.${X}\n"
+  printf "  ${Y}Open port ${lp} for ${B}BOTH UDP and TCP${X}${Y} here (incl. any CLOUD firewall —${X}\n"
+  printf "  ${Y}Hetzner/AWS/GCP; it sits above the VM and ufw does not affect it).${X}\n"
+  printf "  ${D}The relay auto-uses UDP when it can and falls back to TCP if UDP is blocked,${X}\n"
+  printf "  ${D}so even a TCP-only firewall still brings the tunnel up. One exit serves MANY${X}\n"
+  printf "  ${D}relays on this port; add another exit tunnel only for a separate key/port.${X}\n"
   pause
 }
 
@@ -415,14 +420,16 @@ finish_relay(){
   echo; hr
   printf "  ${B}RELAY TUNNEL '${name}' READY${X}  ${D}(transport: ${tr})${X}\n"
   field "relay public IP" "${PUBIP:-unknown}"
-  field "exit server (UDP)" "${SRV}:${LP}"
+  field "exit server" "${SRV}:${LP}  (UDP + TCP auto)"
   printf "    ${D}forwards:${X}\n"
   printf "${FSUM}"
   field "service" "tvtunx-client@${name}"
   hr
   echo
   printf "  In your client app, set ${B}address = ${PUBIP:-<this relay IP>}${X} and use any of the ports above.\n"
-  printf "  ${Y}${B}Open UDP port ${LP} on BOTH servers (incl. cloud firewall).${X}\n"
+  printf "  ${Y}${B}Open port ${LP} for BOTH UDP and TCP on both servers (incl. cloud firewall).${X}\n"
+  printf "  ${D}This relay tries UDP first and falls back to TCP automatically if UDP is${X}\n"
+  printf "  ${D}blocked — so the tunnel comes up even on a UDP-blocking network.${X}\n"
   pause
 }
 

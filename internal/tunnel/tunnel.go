@@ -24,6 +24,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +38,7 @@ import (
 	"github.com/local/tvtunx/internal/mux"
 	"github.com/local/tvtunx/internal/qmask"
 	"github.com/local/tvtunx/internal/rudp"
+	"github.com/local/tvtunx/internal/tcpcarrier"
 )
 
 const (
@@ -104,6 +106,17 @@ type ClientConfig struct {
 	// UDPTargetMbit paces the UDP carrier to this rate (0 = unpaced,
 	// window-limited). Used by both "udp" and "reality-udp".
 	UDPTargetMbit int
+
+	// Net selects which carrier network the relay uses:
+	//   "auto" (default) — try the transport's UDP carrier first and, if it does
+	//                       not answer (blocked/dropped UDP), fall back to TCP on
+	//                       the same port. The winning path is remembered so later
+	//                       sessions go straight to it.
+	//   "udp"            — UDP carrier only (never fall back).
+	//   "tcp"            — TCP carrier only (for paths that block UDP outright).
+	// The exit always listens on BOTH, so a relay can pick either without any
+	// server-side change.
+	Net string
 }
 
 // defaultPoolSize is the number of persistent tunnel connections to the exit
@@ -260,18 +273,90 @@ func relayUDP(pool *SessionPool, f Forward) {
 	}
 }
 
+// pathPref remembers, per exit address, which carrier network last connected
+// ("udp" or "tcp"), so that once auto-fallback has found a working path the
+// pool's later sessions go straight to it instead of racing every time.
+var pathPref sync.Map // serverAddr(string) -> path(string)
+
+// dialSession dials one tunnel session honoring cfg.Net:
+//   - "udp" / "tcp": that carrier only.
+//   - "auto" (default/empty): try the remembered good path first; otherwise race
+//     the UDP and TCP carriers and keep whichever completes the full handshake
+//     first, so a blocked-UDP path transparently uses TCP without a long stall.
 func dialSession(cfg ClientConfig) (*mux.Session, error) {
-	// Carrier layer depends on the transport (direct TLS+knock, or WSS-over-CDN).
-	// Inner layer is identical: the PSK handshake authenticates and keys the
-	// encrypted frame/mux stack.
-	raw, err := dialCarrier(cfg)
+	switch strings.ToLower(cfg.Net) {
+	case "udp":
+		return dialSessionOn(cfg, "udp")
+	case "tcp":
+		return dialSessionOn(cfg, "tcp")
+	}
+	// auto: prefer the last known-good path, else race both.
+	key := cfg.ServerAddr
+	if v, ok := pathPref.Load(key); ok {
+		if s, err := dialSessionOn(cfg, v.(string)); err == nil {
+			return s, nil
+		}
+		pathPref.Delete(key) // the remembered path stopped working; re-discover
+	}
+	return dialSessionRace(cfg)
+}
+
+type dialResult struct {
+	sess *mux.Session
+	path string
+	err  error
+}
+
+// dialSessionRace dials the UDP and TCP carriers concurrently and returns the
+// first to fully connect, closing the loser. This is what lets a firewall that
+// blocks only UDP (or only TCP) be bypassed automatically: the surviving
+// protocol wins the race and is remembered for subsequent sessions.
+func dialSessionRace(cfg ClientConfig) (*mux.Session, error) {
+	ch := make(chan dialResult, 2)
+	for _, p := range []string{"udp", "tcp"} {
+		p := p
+		go func() {
+			s, err := dialSessionOn(cfg, p)
+			ch <- dialResult{sess: s, path: p, err: err}
+		}()
+	}
+	first := <-ch
+	if first.err == nil {
+		pathPref.Store(cfg.ServerAddr, first.path)
+		go func() { // close the loser whenever it eventually finishes
+			r := <-ch
+			if r.sess != nil {
+				r.sess.Close()
+			}
+		}()
+		return first.sess, nil
+	}
+	second := <-ch
+	if second.err == nil {
+		pathPref.Store(cfg.ServerAddr, second.path)
+		return second.sess, nil
+	}
+	return nil, &simpleErr{"both carriers failed — udp: " + first.err.Error() + "; tcp: " + second.err.Error()}
+}
+
+// dialSessionOn dials a specific carrier network ("udp" or "tcp") and runs the
+// inner PSK handshake + frame + mux over it. The inner stack is identical for
+// every transport and network, so the mux layer never knows which carrier it rode.
+func dialSessionOn(cfg ClientConfig, path string) (*mux.Session, error) {
+	var raw net.Conn
+	var err error
+	if path == "tcp" {
+		raw, err = dialCarrierTCP(cfg)
+	} else {
+		raw, err = dialCarrierUDP(cfg)
+	}
 	if err != nil {
 		return nil, err
 	}
 	// Bound the inner handshake. On a PSK/transport mismatch the exit passes the
-	// connection through to the real SNI site, which never sends our handshake
-	// reply — without a deadline the read would block forever. A timeout here
-	// turns that misconfiguration into a clear, fast error instead of a hang.
+	// connection through to the real SNI site (or never replies) — without a
+	// deadline the read would block forever. A timeout turns that into a clear,
+	// fast error instead of a hang (and lets the race abandon a dead path).
 	_ = raw.SetDeadline(time.Now().Add(dialTimeout))
 	keys, err := handshake.Client(raw, cfg.PSK)
 	if err != nil {
@@ -318,10 +403,43 @@ type ServerConfig struct {
 	UDPTargetMbit int
 }
 
+// accepter is the common accept side of every carrier listener (UDP or TCP).
+type accepter interface {
+	Accept() (net.Conn, error)
+}
+
+// acceptInto accepts carriers from l forever, serving each as a tunnel, and
+// reports the terminal error (listener closed/failed) on errc.
+func acceptInto(l accepter, cfg ServerConfig, errc chan<- error) {
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			errc <- err
+			return
+		}
+		go serveTunnel(conn, cfg)
+	}
+}
+
+// rudpNetListener adapts *rudp.Listener (whose Accept returns *rudp.Conn) to the
+// accepter interface (Accept returning net.Conn).
+type rudpNetListener struct{ l *rudp.Listener }
+
+func (a rudpNetListener) Accept() (net.Conn, error) { return a.l.Accept() }
+
+// RunServer runs the exit as a DUAL-STACK listener: for every transport it
+// serves the transport's UDP carrier AND a TCP fallback carrier on the SAME
+// port, concurrently. A relay can connect over whichever the network permits, so
+// a firewall that blocks only UDP (or only TCP) no longer stops the tunnel.
 func RunServer(cfg ServerConfig) error {
-	switch cfg.Transport {
-	case TransportBrowser:
+	if cfg.Transport == TransportBrowser {
 		return runBrowserServer(cfg)
+	}
+
+	// UDP carrier for the selected transport.
+	var udp accepter
+	var udpCloser interface{ Close() error }
+	switch cfg.Transport {
 	case TransportRealityUDP:
 		ql, err := qmask.Listen(cfg.ListenAddr, qmask.Config{
 			SNI:        cfg.SNI, // if set, require the client's ClientHello SNI to match
@@ -331,28 +449,29 @@ func RunServer(cfg ServerConfig) error {
 		if err != nil {
 			return err
 		}
-		log.Printf("exit server listening on %s (transport: reality-udp / QUIC-masquerade)", cfg.ListenAddr)
-		for {
-			conn, err := ql.Accept()
-			if err != nil {
-				return err
-			}
-			go serveTunnel(conn, cfg)
-		}
+		udp, udpCloser = ql, ql
 	default: // TransportUDP
 		rl, err := rudp.Listen(cfg.ListenAddr, rudp.Config{PSK: cfg.PSK, TargetMbit: cfg.UDPTargetMbit})
 		if err != nil {
 			return err
 		}
-		log.Printf("exit server listening on %s (transport: udp / reliable-UDP)", cfg.ListenAddr)
-		for {
-			conn, err := rl.Accept()
-			if err != nil {
-				return err
-			}
-			go serveTunnel(conn, cfg)
-		}
+		udp, udpCloser = rudpNetListener{rl}, rl
 	}
+
+	// TCP fallback carrier on the SAME port (self-signed cert; the relay never
+	// verifies it — the PSK knock authenticates). This is what keeps the exit
+	// reachable when UDP is blocked or dropped.
+	tl, err := tcpcarrier.Listen(cfg.ListenAddr, tcpcarrier.Config{PSK: cfg.PSK, SNICN: cfg.SNI})
+	if err != nil {
+		udpCloser.Close()
+		return err
+	}
+	log.Printf("exit listening on %s — dual-stack: UDP (%s) + TCP (TLS fallback)", cfg.ListenAddr, carrierName(cfg.Transport))
+
+	errc := make(chan error, 2)
+	go acceptInto(udp, cfg, errc)
+	go acceptInto(tl, cfg, errc)
+	return <-errc
 }
 
 // runBrowserServer runs the exit for the "browser" transport: it obtains a real
@@ -368,63 +487,48 @@ func runBrowserServer(cfg ServerConfig) error {
 		cacheDir = "/etc/tvtunx/acme"
 	}
 
-	// DNS-01 path: if a wildcard certificate obtained via `tvtunx cert` is present,
-	// use it directly — no :80 responder needed (works when :80/:443 are taken by
-	// another service, e.g. a panel node's xray).
+	// Resolve the certificate source once; both the UDP (HTTP/3) and TCP (HTTPS)
+	// carriers present the SAME real certificate for the domain.
+	var getCert func(*tls.ClientHelloInfo) (*tls.Certificate, error)
+
 	if cert, err := acmedns.LoadCert(cacheDir); err == nil {
-		uaddr, err := net.ResolveUDPAddr("udp", cfg.ListenAddr)
-		if err != nil {
-			return err
-		}
-		pc, err := net.ListenUDP("udp", uaddr)
-		if err != nil {
-			return err
-		}
+		// DNS-01 wildcard cert present (from `tvtunx cert`): no :80 responder
+		// needed — works when :80/:443 are taken by another service (e.g. a panel
+		// node's xray).
 		holder := &certHolder{}
 		holder.set(cert)
-		tlsConf := &tls.Config{GetCertificate: holder.get}
+		getCert = holder.get
 		if cfg.CFToken != "" && cfg.Label != "" {
 			go autoRenewCert(cacheDir, cfg.Domain, cfg.Label, cfg.CFToken, holder)
 		}
-		bl := browser.Listen(pc, tlsConf, cfg.PSK)
-		log.Printf("exit server listening on %s (transport: browser / DNS-01 wildcard cert for *.%s.%s — no :80 needed)",
-			cfg.ListenAddr, cfg.Label, cfg.Domain)
-		for {
-			conn, err := bl.Accept()
-			if err != nil {
-				return err
-			}
-			go serveTunnel(conn, cfg)
-		}
-	}
-	// HostPolicy bounds which names we will obtain certificates for. With rotation
-	// (Label set) we accept the bare domain plus any PSK-valid rotating hostname for
-	// today/yesterday — so scanners can't make us issue certs for arbitrary names
-	// (which would hit Let's Encrypt rate limits), only our own ~daily names.
-	var policy autocert.HostPolicy
-	if cfg.Label != "" {
-		dom, label, psk := cfg.Domain, cfg.Label, cfg.PSK
-		policy = func(_ context.Context, host string) error {
-			if host == dom || browser.ValidRotatingName(host, dom, label, psk, time.Now()) {
-				return nil
-			}
-			return &simpleErr{"browser: host not allowed: " + host}
-		}
+		log.Printf("browser: using DNS-01 wildcard cert for *.%s.%s (no :80 needed)", cfg.Label, cfg.Domain)
 	} else {
-		policy = autocert.HostWhitelist(cfg.Domain)
-	}
-	m := &autocert.Manager{
-		Prompt:     autocert.AcceptTOS,
-		HostPolicy: policy,
-		Cache:      autocert.DirCache(cacheDir),
-	}
-	// ACME HTTP-01 challenge responder on :80 (Let's Encrypt connects here).
-	go func() {
-		if err := http.ListenAndServe(":80", m.HTTPHandler(nil)); err != nil {
-			log.Printf("browser: ACME HTTP-01 responder on :80 failed: %v (cert issuance/renewal needs :80 open)", err)
+		// HTTP-01 path: obtain/renew via an ACME responder on :80. HostPolicy
+		// bounds which names we issue for (the bare domain plus PSK-valid rotating
+		// names when Label is set), so scanners cannot drive arbitrary issuance.
+		var policy autocert.HostPolicy
+		if cfg.Label != "" {
+			dom, label, psk := cfg.Domain, cfg.Label, cfg.PSK
+			policy = func(_ context.Context, host string) error {
+				if host == dom || browser.ValidRotatingName(host, dom, label, psk, time.Now()) {
+					return nil
+				}
+				return &simpleErr{"browser: host not allowed: " + host}
+			}
+		} else {
+			policy = autocert.HostWhitelist(cfg.Domain)
 		}
-	}()
+		m := &autocert.Manager{Prompt: autocert.AcceptTOS, HostPolicy: policy, Cache: autocert.DirCache(cacheDir)}
+		go func() {
+			if err := http.ListenAndServe(":80", m.HTTPHandler(nil)); err != nil {
+				log.Printf("browser: ACME HTTP-01 responder on :80 failed: %v (cert issuance/renewal needs :80 open)", err)
+			}
+		}()
+		getCert = m.GetCertificate
+		log.Printf("browser: HTTP-01 issuance for %s — ensure :80/tcp is open and the A record points here", cfg.Domain)
+	}
 
+	// UDP carrier: real HTTP/3 (quic-go) with the real certificate.
 	uaddr, err := net.ResolveUDPAddr("udp", cfg.ListenAddr)
 	if err != nil {
 		return err
@@ -433,18 +537,24 @@ func runBrowserServer(cfg ServerConfig) error {
 	if err != nil {
 		return err
 	}
-	tlsConf := &tls.Config{GetCertificate: m.GetCertificate}
-	bl := browser.Listen(pc, tlsConf, cfg.PSK)
-	log.Printf("exit server listening on %s (transport: browser / real HTTP-3 for %s)", cfg.ListenAddr, cfg.Domain)
-	log.Printf("browser: first connection triggers Let's Encrypt issuance for %s — ensure :80/tcp and :%s are open and the domain's A record points here",
-		cfg.Domain, portOf(cfg.ListenAddr))
-	for {
-		conn, err := bl.Accept()
-		if err != nil {
-			return err
-		}
-		go serveTunnel(conn, cfg)
+	bl := browser.Listen(pc, &tls.Config{GetCertificate: getCert}, cfg.PSK)
+
+	// TCP fallback carrier: ordinary HTTPS bytes — TLS with the SAME real cert and
+	// an h2 ALPN — plus the PSK knock. When UDP/HTTP-3 is blocked, the relay falls
+	// back to this and the exit still looks like a normal web server on TCP.
+	tcpTLS := &tls.Config{GetCertificate: getCert, MinVersion: tls.VersionTLS12, NextProtos: []string{"h2", "http/1.1"}}
+	tl, err := tcpcarrier.Listen(cfg.ListenAddr, tcpcarrier.Config{PSK: cfg.PSK, TLS: tcpTLS})
+	if err != nil {
+		bl.Close()
+		pc.Close()
+		return err
 	}
+	log.Printf("exit listening on %s — dual-stack: UDP (HTTP/3) + TCP (HTTPS) for %s", cfg.ListenAddr, cfg.Domain)
+
+	errc := make(chan error, 2)
+	go acceptInto(bl, cfg, errc)
+	go acceptInto(tl, cfg, errc)
+	return <-errc
 }
 
 // certHolder serves the current certificate and allows a safe hot-swap on renewal.

@@ -3,6 +3,7 @@ package tunnel
 import (
 	"crypto/tls"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/local/tvtunx/internal/browser"
@@ -11,6 +12,7 @@ import (
 	"github.com/local/tvtunx/internal/mux"
 	"github.com/local/tvtunx/internal/qmask"
 	"github.com/local/tvtunx/internal/rudp"
+	"github.com/local/tvtunx/internal/tcpcarrier"
 )
 
 // Transport names (v1.0.0 ships exactly two, both UDP-carried):
@@ -54,9 +56,11 @@ func carrierName(t string) string {
 
 // ───────────────────────────── client carrier ─────────────────────────────
 
-// dialCarrier establishes the transport-specific carrier connection. The inner
-// stack (PSK handshake -> frame -> mux) is identical regardless of transport.
-func dialCarrier(cfg ClientConfig) (net.Conn, error) {
+// dialCarrierUDP establishes the UDP-based carrier for the selected transport
+// (browser / reality-udp / udp). The inner stack (PSK handshake -> frame -> mux)
+// is identical regardless of transport. When the UDP path is blocked, the relay
+// falls back to dialCarrierTCP (see dialSession).
+func dialCarrierUDP(cfg ClientConfig) (net.Conn, error) {
 	switch cfg.Transport {
 	case TransportBrowser:
 		// Connect to the exit as a real browser: a genuine HTTP/3 request to the
@@ -96,6 +100,57 @@ func dialCarrier(cfg ClientConfig) (net.Conn, error) {
 			TargetMbit: cfg.UDPTargetMbit,
 			PSK:        cfg.PSK,
 		})
+	}
+}
+
+// dialCarrierTCP establishes the TCP fallback carrier (TLS + PSK knock). It is
+// transport-agnostic — a reliable TLS stream that looks like HTTPS on the wire —
+// but it picks the ClientHello SNI to match the chosen transport's disguise so a
+// relay that switches from UDP to TCP keeps presenting a consistent hostname.
+func dialCarrierTCP(cfg ClientConfig) (net.Conn, error) {
+	return tcpcarrier.Dial(cfg.ServerAddr, tcpcarrier.DialConfig{
+		PSK: cfg.PSK,
+		SNI: tcpSNI(cfg),
+	})
+}
+
+// dialCarrierProbe (diagnostics) returns a live carrier and which network it
+// used ("udp" or "tcp"), honoring cfg.Net. In auto mode it tries the transport's
+// UDP carrier first and falls back to TCP, exactly as a relay would — so `tvtunx
+// diag` reports the path the tunnel will actually take.
+func dialCarrierProbe(cfg ClientConfig) (net.Conn, string, error) {
+	switch strings.ToLower(cfg.Net) {
+	case "udp":
+		c, err := dialCarrierUDP(cfg)
+		return c, "udp", err
+	case "tcp":
+		c, err := dialCarrierTCP(cfg)
+		return c, "tcp", err
+	}
+	if c, err := dialCarrierUDP(cfg); err == nil {
+		return c, "udp", nil
+	}
+	c, err := dialCarrierTCP(cfg)
+	if err != nil {
+		return nil, "", err
+	}
+	return c, "tcp", nil
+}
+
+// tcpSNI returns the TLS ServerName the TCP fallback should present for this
+// transport: the browser transport's real (possibly rotating) domain, the
+// reality-udp pinned site, or the configured SNI for plain udp (may be empty).
+func tcpSNI(cfg ClientConfig) string {
+	switch cfg.Transport {
+	case TransportBrowser:
+		if cfg.Label != "" {
+			return browser.RotatingName(cfg.Domain, cfg.Label, cfg.PSK, time.Now())
+		}
+		return cfg.Domain
+	case TransportRealityUDP:
+		return cfg.SNI
+	default:
+		return cfg.SNI
 	}
 }
 

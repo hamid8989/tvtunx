@@ -51,6 +51,26 @@ Pick one with `-transport` (the **same on both ends**):
 | `udp` | obfuscated UDP, not disguised as a named protocol | fastest / lowest overhead, for links that only throttle UDP |
 | `browser` | a **genuine HTTP/3 visit to a real website** on your domain, with a real Let's Encrypt certificate | **strongest realism** — not imitation, it IS browser traffic; needs a domain |
 
+### Dual-stack: automatic TCP fallback / حالتِ دو-لایه و fallback خودکار به TCP
+
+Every transport is **dual-stack**. The exit listens on the **same port over both
+UDP and TCP**, and the relay picks the network automatically (`-net auto`, the
+default): it races the UDP carrier and a TCP carrier and keeps whichever connects
+first, remembering it for later sessions. So a firewall or ISP that **blocks or
+drops UDP** — the common case in some networks — no longer stops the tunnel: it
+transparently continues over TCP. The TCP carrier is a normal **TLS (HTTPS-looking)
+connection** authenticated by the same PSK (a short HMAC knock after the TLS
+handshake; the certificate is not trusted on its own), so on the wire it looks like
+an ordinary web connection to the transport's site/domain.
+
+Force a single network with `-net udp` or `-net tcp` when you already know the path.
+No server-side change is ever needed — the exit always serves both.
+
+هر ترانسپورت **دو-لایه** است: خروجی روی **همان پورت، هم UDP و هم TCP** گوش می‌دهد و
+رله خودکار (`-net auto`) هر کدام که وصل شود را انتخاب می‌کند. بنابراین اگر فایروال یا
+ISP فقط **UDP را ببندد**، تونل به‌طور شفاف روی **TCP** بالا می‌آید و قطع نمی‌شود. لایه‌ی
+TCP یک اتصالِ **TLS (شبیهِ HTTPS)** است که با همان PSK احراز می‌شود.
+
 ### `browser` — a real website, not an imitation
 
 The exit hosts a **real website** on a domain you own, with a **real Let's Encrypt
@@ -146,7 +166,9 @@ UDP to one address, consistent with a live QUIC session.
 
 ### Layers / لایه‌ها
 
-1. **Carrier** — `udp` (reliable-UDP) or `reality-udp` (QUIC masquerade + reliable-UDP).
+1. **Carrier** — the transport's UDP carrier (`udp` reliable-UDP, `reality-udp`
+   QUIC masquerade, or `browser` HTTP/3) **with a TCP fallback carrier on the same
+   port** (TLS + PSK knock). The relay chooses UDP or TCP automatically (`-net auto`).
 2. **PSK handshake** — a probe-resistant authenticated key exchange; a wrong PSK
    gets no usable reply.
 3. **Frame layer** — authenticated encryption with length hiding and padding.

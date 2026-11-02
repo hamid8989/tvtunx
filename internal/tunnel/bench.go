@@ -23,6 +23,7 @@ type BenchConfig struct {
 	Domain        string // browser transport
 	Label         string // browser transport (rotating subdomains)
 	UDPTargetMbit int
+	Net           string // carrier network: "auto" (default), "udp" or "tcp"
 }
 
 // BenchReport holds measured results. All times are milliseconds.
@@ -50,7 +51,7 @@ func RunBench(cfg BenchConfig) *BenchReport {
 	}
 	ccfg := ClientConfig{
 		ServerAddr: cfg.ServerAddr, PSK: cfg.PSK, SNI: cfg.SNI, Domain: cfg.Domain, Label: cfg.Label, Window: cfg.Window,
-		Transport: cfg.Transport, UDPTargetMbit: cfg.UDPTargetMbit,
+		Transport: cfg.Transport, Net: cfg.Net, UDPTargetMbit: cfg.UDPTargetMbit,
 	}
 
 	// 1) Tunnel session handshake time (carrier + PSK).

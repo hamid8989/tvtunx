@@ -164,6 +164,15 @@ func checkTransport(t string) {
 	}
 }
 
+func checkNet(n string) {
+	switch n {
+	case "auto", "udp", "tcp", "":
+	default:
+		fmt.Fprintf(os.Stderr, "error: -net must be 'auto', 'udp' or 'tcp' (got %q)\n", n)
+		os.Exit(1)
+	}
+}
+
 // forwardList collects repeated -forward flags.
 type forwardList []tunnel.Forward
 
@@ -237,6 +246,7 @@ func runClient(args []string) {
 	proto := fs.String("proto", "both", "which to forward: tcp, udp, or both")
 	window := fs.Int("window", 1024, "per-stream flow-control window in KB")
 	transport := fs.String("transport", "reality-udp", "carrier transport: udp, reality-udp or browser")
+	netMode := fs.String("net", "auto", "carrier network: auto (UDP, then TCP fallback if UDP is blocked), udp, or tcp")
 	udpTarget := fs.Int("udp-target", 0, "pace the UDP carrier to this Mbit/s (0 = unpaced)")
 	rotate := fs.Int("rotate", 0, "retire each tunnel connection after N seconds to beat ISP per-flow throttling (0 = off)")
 	pool := fs.Int("pool", 0, "number of parallel tunnel connections (0 = default 6; raise to beat per-flow throttling)")
@@ -244,6 +254,7 @@ func runClient(args []string) {
 	fs.Var(&fwds, "forward", "LISTEN_PORT:DEST_HOST:DEST_PORT (repeatable)")
 	_ = fs.Parse(args)
 	checkTransport(*transport)
+	checkNet(*netMode)
 
 	if *server == "" {
 		fmt.Fprintln(os.Stderr, "error: -server is required")
@@ -281,6 +292,7 @@ func runClient(args []string) {
 		DoH:           *doh,
 		Window:        *window * 1024,
 		Transport:     *transport,
+		Net:           *netMode,
 		UDPTargetMbit: *udpTarget,
 		RotateSec:     *rotate,
 		PoolSize:      *pool,
@@ -301,9 +313,11 @@ func runBench(args []string) {
 	secs := fs.Int("secs", 5, "throughput/under-load test duration")
 	window := fs.Int("window", 0, "per-stream window in KB to test (0 = installed default)")
 	transport := fs.String("transport", "reality-udp", "carrier transport: udp, reality-udp or browser")
+	netMode := fs.String("net", "auto", "carrier network: auto (UDP, then TCP fallback), udp, or tcp")
 	udpTarget := fs.Int("udp-target", 0, "pace the UDP carrier to this Mbit/s (0 = unpaced)")
 	_ = fs.Parse(args)
 	checkTransport(*transport)
+	checkNet(*netMode)
 	if *server == "" || (*transport == tunnel.TransportRealityUDP && *sni == "") || (*transport == tunnel.TransportBrowser && *domain == "") {
 		fmt.Fprintln(os.Stderr, "error: -server is required (-sni for reality-udp, -domain for browser)")
 		os.Exit(1)
@@ -317,6 +331,7 @@ func runBench(args []string) {
 		Seconds:       *secs,
 		Window:        *window * 1024,
 		Transport:     *transport,
+		Net:           *netMode,
 		UDPTargetMbit: *udpTarget,
 	})
 	fmt.Printf("\n%s%s  TUNNEL BENCHMARK%s\n", cBold, cCyan, cReset)
@@ -387,9 +402,11 @@ func runDiag(args []string) {
 	domain := fs.String("domain", "", "browser: the exit's real domain")
 	label := fs.String("label", "", "browser: rotating-subdomain label (match the exit)")
 	transport := fs.String("transport", "reality-udp", "carrier transport: udp, reality-udp or browser")
+	netMode := fs.String("net", "auto", "carrier network: auto (UDP, then TCP fallback), udp, or tcp")
 	udpTarget := fs.Int("udp-target", 0, "pace the UDP carrier to this Mbit/s (0 = unpaced)")
 	_ = fs.Parse(args)
 	checkTransport(*transport)
+	checkNet(*netMode)
 	if *server == "" {
 		fmt.Fprintln(os.Stderr, "error: -server is required")
 		os.Exit(1)
@@ -406,6 +423,7 @@ func runDiag(args []string) {
 		Domain:        *domain,
 		Label:         *label,
 		Transport:     *transport,
+		Net:           *netMode,
 		UDPTargetMbit: *udpTarget,
 	})
 

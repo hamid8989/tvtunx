@@ -60,3 +60,28 @@ PSK خروجی **کاملاً خاموش** می‌ماند. نکته‌ی صاد
 کروم نیست و با DPIِ fingerprintِ دقیق ممکن است قابل‌تشخیص باشد؛ و چون نمی‌توان آن را
 در محیطِ build مقابلِ DPIِ واقعی تست کرد، حتماً روی مسیرِ واقعی امتحانش کنید و اگر
 مسدود شد پورتِ UDP را عوض کنید یا از ترانسپورتِ `udp` استفاده کنید.
+
+## ۵. حاملِ TCP (fallback) / TCP fallback carrier
+
+هر ترانسپورت علاوه بر UDP، روی **همان پورت یک حاملِ TCP** هم دارد تا وقتی شبکه UDP را
+می‌بندد، تونل روی TCP بالا بیاید (`-net auto`). این حامل یک اتصالِ **TLS** است که
+روی سیم شبیهِ HTTPS دیده می‌شود، اما **گواهیِ TLS مبنای احراز نیست**: بلافاصله پس از
+هندشیکِ TLS، دو طرف با یک **knock مبتنی بر HMAC و PSK** یکدیگر را تأیید می‌کنند و اگر
+PSK اشتباه باشد سرور **در سکوت** اتصال را می‌بندد (مثلِ یک وب‌سروری که سرویسی پشتش
+نیست). پس یک prober که TLS را کامل کند ولی PSK نداشته باشد چیزی یاد نمی‌گیرد.
+
+Every transport also exposes a **TCP carrier on the same port** so the tunnel still
+comes up when the network blocks UDP (`-net auto`). It is a **TLS** connection
+(HTTPS-shaped on the wire), but the **certificate is not the authenticator**:
+immediately after the TLS handshake both ends prove the PSK with an **HMAC knock**,
+and a wrong PSK is dropped **silently** (like a web server with no service behind
+it). Honest limitations:
+- For `reality-udp`/`udp` the TCP cert is **self-signed** (the client never verifies
+  it — the knock authenticates), so a censor inspecting the certificate sees a
+  self-signed cert for the chosen SNI. For `browser` the exit presents its **real**
+  Let's Encrypt cert, so the TCP path is genuine HTTPS to your domain.
+- The TCP carrier is a TLS record stream, **not** a full HTTP/2 session, so deep
+  HTTP-aware DPI could tell it from real browsing. It is a reachability fallback for
+  UDP-blocking paths, not a stronger disguise than the UDP transports.
+- Over a clean low-loss path TCP can be faster; over a lossy/throttled path the UDP
+  carriers (loss-tolerant) are better. `-net auto` prefers UDP and only falls back.
