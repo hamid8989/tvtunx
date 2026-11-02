@@ -822,7 +822,8 @@ uninstall(){
     ok "TVtunX fully removed from this server."; pause; return
   fi
   [[ "$c" =~ ^[0-9]+$ ]] && (( c>=1 && c<=${#names[@]} )) || { warn "invalid"; pause; return; }
-  local sel="${names[$((c-1))]}" role="${sel%%:*}" name="${sel#*:}"
+  local sel="${names[$((c-1))]}"
+  local role="${sel%%:*}" name="${sel#*:}"
   if [[ "$role" == exit ]]; then systemctl disable --now "tvtunx-server@${name}" >/dev/null 2>&1; rm -f "$(server_env "$name")"
   else systemctl disable --now "tvtunx-client@${name}" >/dev/null 2>&1; rm -f "$(client_env "$name")"; fi
   systemctl daemon-reload
@@ -835,6 +836,67 @@ installed_summary(){
   local s c; s=$(list_instances server | wc -l | tr -d ' '); c=$(list_instances client | wc -l | tr -d ' ')
   [[ "$s" == 0 && "$c" == 0 ]] && { echo "none"; return; }
   echo "${s} exit, ${c} relay"
+}
+
+# ---- self-update from GitHub ----
+REPO_OWNER="hamid8989"; REPO_NAME="tvtunx"
+REPO_GIT="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+REPO_RAW="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/main"
+
+# _dl URL OUTFILE -> download over HTTPS with curl or wget (0 = ok, 2 = no tool)
+_dl(){
+  if command -v curl >/dev/null 2>&1; then curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null 2>&1; then wget -qO "$2" "$1"
+  else return 2; fi
+}
+
+# apply_update_from DIR -> install the new binary + unit templates from an updated
+# source tree, restart any running tunnels, then re-exec the updated menu.
+apply_update_from(){
+  local dir="$1" newscript="$dir/deploy/install.sh"
+  [[ -f "$newscript" ]] || { err "update tree missing deploy/install.sh"; return 1; }
+  local b src; b=$(arch_bin)
+  src="$dir/dist/$b"; [[ -f "$src" ]] || src="$dir/deploy/$b"
+  if [[ -f "$src" ]]; then install -m 0755 "$src" "$BIN" && ok "binary -> $("$BIN" version 2>/dev/null)"
+  else warn "no bundled binary for $(uname -m); keeping the current one"; fi
+  local u
+  for u in tvtunx-server@.service tvtunx-client@.service; do
+    [[ -f "$dir/deploy/$u" ]] && install -m 0644 "$dir/deploy/$u" "/etc/systemd/system/$u"
+  done
+  systemctl daemon-reload
+  local n
+  for n in $(list_instances server); do systemctl is-active --quiet "tvtunx-server@$n" && { systemctl restart "tvtunx-server@$n"; ok "restarted tvtunx-server@$n"; }; done
+  for n in $(list_instances client); do systemctl is-active --quiet "tvtunx-client@$n" && { systemctl restart "tvtunx-client@$n"; ok "restarted tvtunx-client@$n"; }; done
+  ok "update complete — reloading menu..."
+  sleep 1
+  exec bash "$newscript"
+}
+
+# self_update -> fetch the latest release from GitHub (git pull in-place, else a
+# stable HTTPS tarball, else a fresh clone) and apply it.
+self_update(){
+  echo; say "Updating TVtunX from GitHub (${REPO_OWNER}/${REPO_NAME})..."
+  local ROOT; ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+  # A) in-place git pull when this was cloned
+  if [[ -d "$ROOT/.git" ]] && command -v git >/dev/null 2>&1; then
+    if git -C "$ROOT" pull --ff-only 2>&1 | sed 's/^/    /'; then
+      apply_update_from "$ROOT"; return
+    fi
+    warn "git pull failed; trying a direct download..."
+  fi
+  local tmp; tmp=$(mktemp -d)
+  # B) stable tarball over HTTPS (works where the git protocol is blocked but
+  #    raw.githubusercontent.com is reachable)
+  if _dl "${REPO_RAW}/release/tvtunx-latest.tar.gz" "$tmp/t.tgz" && tar -xzf "$tmp/t.tgz" -C "$tmp" 2>/dev/null; then
+    local d; d=$(find "$tmp" -maxdepth 1 -type d -name 'tvtunx-*' | head -1)
+    [[ -n "$d" ]] && { apply_update_from "$d"; return; }
+  fi
+  # C) fresh clone
+  if command -v git >/dev/null 2>&1 && git clone --depth 1 "$REPO_GIT" "$tmp/tvtunx" 2>/dev/null; then
+    apply_update_from "$tmp/tvtunx"; return
+  fi
+  err "could not update — GitHub not reachable (git and HTTPS both failed). Check network/filtering, or update manually with: cd ~/tvtunx && git pull && sudo bash deploy/install.sh"
+  pause
 }
 
 main_menu(){
@@ -854,6 +916,7 @@ main_menu(){
     printf "    ${B}7${X}  Restart a tunnel\n"
     printf "    ${B}8${X}  Live log\n"
     printf "    ${B}9${X}  Uninstall (one tunnel or all)\n"
+    printf "    ${B}u${X}  Update TVtunX  ${D}(pull the latest script + binary from GitHub)${X}\n"
     printf "    ${B}0${X}  Exit\n"
     hr
     local def=""; [[ "$GUESS" == exit ]] && def="1"; [[ "$GUESS" == relay ]] && def="2"
@@ -861,6 +924,7 @@ main_menu(){
     case "$ch" in
       1) install_exit ;; 2) install_relay ;; 3) edit_tunnel ;; 4) test_tunnel ;;
       5) bench_tunnel ;; 6) show_status ;; 7) restart_tunnel ;; 8) live_log ;; 9) uninstall ;;
+      u|U) self_update ;;
       0) echo; exit 0 ;; *) warn "invalid choice"; sleep 1 ;;
     esac
   done
